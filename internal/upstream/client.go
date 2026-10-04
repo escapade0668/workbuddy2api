@@ -398,7 +398,11 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 // 只有传输层失败才返回 err。
 func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
 	url := c.chatBase(a) + "/v2/chat/completions"
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(c.prepareBody(body)))
+	payload := c.prepareBody(body)
+	if isGlobalRealm(a) {
+		payload = ensureLeadingSystem(payload)
+	}
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return nil, 0, nil, err
 	}
@@ -426,7 +430,42 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	return monitorBody(resp.Body, c.IdleTimeout, cancel), resp.StatusCode, nil, nil
 }
 
-// ModelInfo 动态模型信息（含 maxInputTokens/maxOutputTokens）。
+// ensureLeadingSystem 保证 messages 首条是 system：不是则在最前补一条空 system，其余原样。
+//
+// 国际版（workbuddy.ai）要求首条消息是 system，否则 400 code=11128
+// "first message is not system prompt"（被上游当安全策略拦截）。2026-10-05 实测：
+// 空串 system 即可通过，对对话语义无影响；system 不在首位同样被拒，故补在最前而不是挪动原消息。
+// 网关此前原样透传：国际版账号上不带 system 的请求全部失败，又被当普通 4xx 静默轮转到国内版。
+// 解析失败（非 JSON / 无 messages）时原样返回，交给上游报错。
+func ensureLeadingSystem(body []byte) []byte {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body
+	}
+	var msgs []json.RawMessage
+	if err := json.Unmarshal(obj["messages"], &msgs); err != nil || len(msgs) == 0 {
+		return body
+	}
+	var first struct {
+		Role string `json:"role"`
+	}
+	if json.Unmarshal(msgs[0], &first) == nil && first.Role == "system" {
+		return body
+	}
+	msgs = append([]json.RawMessage{json.RawMessage(`{"role":"system","content":""}`)}, msgs...)
+	raw, err := json.Marshal(msgs)
+	if err != nil {
+		return body
+	}
+	obj["messages"] = raw
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// ModelInfo 动态模型信息（上游 data.models 条目，只取网关用得到的字段）。
 type ModelInfo struct {
 	ID            string
 	Name          string
