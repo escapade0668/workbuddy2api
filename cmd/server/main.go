@@ -137,6 +137,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go sch.Run(ctx)
+	// 预热各域模型目录：聊天路由按目录做域偏好（只读缓存，不在请求路径上打上游）。
+	go h.WarmModels()
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,

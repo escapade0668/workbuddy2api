@@ -555,12 +555,21 @@ var staticModels = []map[string]any{
 	{"id": "deepseek-v4-flash", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
 }
 
-// dynamicModelsCache 动态模型缓存。
-var dynamicModelsCache struct {
-	sync.RWMutex
-	ids      []upstream.ModelInfo
+// realmCatalog 一个域的动态模型目录缓存。
+type realmCatalog struct {
+	infos    []upstream.ModelInfo
 	fetched  time.Time // 最近一次成功拉取时间
 	lastFail time.Time // 最近一次拉取失败时间（负缓存）
+}
+
+// dynamicModelsCache 按域（cn / global）缓存的动态模型目录。
+//
+// 为什么按域：国内版与国际版是两套独立目录（同名模型倍率不同，各有独有模型）。
+// 旧实现只用池里随机一个账号取一份目录，双域并存时另一个域的模型整个缺失，
+// 客户端看到的列表随机在两个域之间跳。
+var dynamicModelsCache struct {
+	sync.RWMutex
+	byRealm map[string]*realmCatalog
 }
 
 const (
@@ -568,7 +577,17 @@ const (
 	modelsFetchFailCooldown = 5 * time.Minute
 )
 
-// models 返回模型列表：优先动态（缓存 1h），失败回退静态表。
+// realmOrder 合并目录时的域顺序（决定 /v1/models 里条目与 realms 的排列）。
+var realmOrder = []string{"cn", "global"}
+
+func realmOf(a *auth.Auth) string {
+	if upstream.IsGlobalRealm(a) {
+		return "global"
+	}
+	return "cn"
+}
+
+// models 返回模型列表：各域动态目录的并集（缓存 1h），全部失败时回退静态表。
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
@@ -576,64 +595,217 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// modelList 动态获取模型列表并包装成 OpenAI 格式（含 context_length）。
+// modelList 合并各域目录并包装成 OpenAI 格式。
+//
+// 每个条目带 realms（该模型可用的域）；倍率在各域原文一致时给 credits，
+// 不一致时给 credits_by_realm（不擅自挑一个域的倍率冒充全部）。
 func (h *Handler) modelList() []map[string]any {
-	if infos := h.fetchDynamicModels(); len(infos) > 0 {
-		out := make([]map[string]any, 0, len(infos))
-		for _, mi := range infos {
-			entry := map[string]any{
-				"id":                mi.ID,
-				"object":            "model",
-				"created":           1753600000,
-				"owned_by":          "workbuddy",
-				"context_length":    mi.ContextWindow,
-				"max_output_tokens": mi.MaxTokens,
+	byRealm := h.fetchDynamicModels()
+	var out []map[string]any
+	idx := map[string]int{}
+	credits := map[string]map[string]string{}
+	for _, realm := range realmOrder {
+		for _, mi := range byRealm[realm] {
+			if i, ok := idx[mi.ID]; ok {
+				out[i]["realms"] = append(out[i]["realms"].([]string), realm)
+				credits[mi.ID][realm] = mi.Credits
+				continue
 			}
-			if mi.ContextWindow == 0 {
-				entry["context_length"] = 131072 // 兜底
-			}
+			entry := modelEntry(mi)
+			entry["realms"] = []string{realm}
+			idx[mi.ID] = len(out)
 			out = append(out, entry)
+			credits[mi.ID] = map[string]string{realm: mi.Credits}
 		}
-		return out
 	}
-	return staticModels
+	if len(out) == 0 {
+		return staticModels
+	}
+	for id, i := range idx {
+		byR := credits[id]
+		distinct := map[string]bool{}
+		for _, c := range byR {
+			distinct[c] = true
+		}
+		switch {
+		case len(distinct) == 1:
+			for c := range distinct {
+				if c != "" {
+					out[i]["credits"] = c
+				}
+			}
+		default:
+			out[i]["credits_by_realm"] = byR
+		}
+	}
+	return out
 }
 
-// fetchDynamicModels 从池中任一健康账号拉模型列表（含 contextWindow/maxTokens），缓存 1h。
-// 拉取失败记录时间戳进入 5min 负缓存，冷却期内直接用静态表，避免反复打上游。
-func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
-	dynamicModelsCache.RLock()
-	if len(dynamicModelsCache.ids) > 0 && time.Since(dynamicModelsCache.fetched) < dynamicModelsTTL {
-		out := dynamicModelsCache.ids
-		dynamicModelsCache.RUnlock()
-		return out
+// modelEntry 单个目录条目 → OpenAI 模型对象（附带目录元信息，空值省略）。
+func modelEntry(mi upstream.ModelInfo) map[string]any {
+	entry := map[string]any{
+		"id":                mi.ID,
+		"object":            "model",
+		"created":           1753600000,
+		"owned_by":          "workbuddy",
+		"context_length":    mi.ContextWindow,
+		"max_output_tokens": mi.MaxTokens,
 	}
-	// 失败负缓存：冷却期内不再请求上游。
-	if !dynamicModelsCache.lastFail.IsZero() && time.Since(dynamicModelsCache.lastFail) < modelsFetchFailCooldown {
+	if mi.ContextWindow == 0 {
+		entry["context_length"] = 131072 // 兜底
+	}
+	set := func(k, v string) {
+		if v != "" {
+			entry[k] = v
+		}
+	}
+	flag := func(k string, v bool) {
+		if v {
+			entry[k] = true
+		}
+	}
+	set("name", mi.Name)
+	set("description", mi.Description)
+	set("vendor", mi.Vendor)
+	set("reasoning_effort", mi.ReasoningEffort)
+	if len(mi.Tags) > 0 {
+		entry["tags"] = mi.Tags
+	}
+	if mi.MaxAllowedSize > 0 {
+		entry["max_allowed_size"] = mi.MaxAllowedSize
+	}
+	flag("is_default", mi.IsDefault)
+	flag("only_reasoning", mi.OnlyReasoning)
+	flag("supports_images", mi.SupportsImages)
+	flag("supports_reasoning", mi.SupportsReasoning)
+	flag("supports_tool_call", mi.SupportsToolCall)
+	return entry
+}
+
+// fetchDynamicModels 按域拉取模型目录（每域缓存 1h），返回 realm → 目录。
+//
+// 每个域用该域的健康账号取（最多试 2 个）。拉取失败进入该域 5min 负缓存，期间若有旧目录
+// 则继续用旧的。失败**不罚账号**：目录端点失败与账号健康无关（旧实现会 NoteError，
+// 而旧端点在国际版恒 500，国际版账号每次被选来取目录都白挨一次罚）。
+func (h *Handler) fetchDynamicModels() map[string][]upstream.ModelInfo {
+	healthy := map[string][]*auth.Auth{}
+	for _, uid := range h.cfg.Pool.AvailableUIDs() {
+		if a := h.cfg.Pool.PeekByUID(uid); a != nil {
+			healthy[realmOf(a)] = append(healthy[realmOf(a)], a)
+		}
+	}
+	present := map[string]bool{} // 池里（不论健康与否）有账号的域
+	for _, st := range h.cfg.Pool.List() {
+		if a := h.cfg.Pool.PeekByUID(st.UID); a != nil {
+			present[realmOf(a)] = true
+		}
+	}
+
+	out := map[string][]upstream.ModelInfo{}
+	for _, realm := range realmOrder {
+		if !present[realm] {
+			continue // 该域已没有账号：旧目录不再展示
+		}
+		dynamicModelsCache.RLock()
+		var cached realmCatalog
+		if c := dynamicModelsCache.byRealm[realm]; c != nil {
+			cached = *c
+		}
 		dynamicModelsCache.RUnlock()
-		return nil
+
+		if len(cached.infos) > 0 && time.Since(cached.fetched) < dynamicModelsTTL {
+			out[realm] = cached.infos
+			continue
+		}
+		failCooling := !cached.lastFail.IsZero() && time.Since(cached.lastFail) < modelsFetchFailCooldown
+		if len(healthy[realm]) == 0 || failCooling {
+			if len(cached.infos) > 0 {
+				out[realm] = cached.infos // 暂时取不了：沿用旧目录
+			}
+			continue
+		}
+
+		var infos []upstream.ModelInfo
+		var err error
+		for i, a := range healthy[realm] {
+			if i >= 2 {
+				break
+			}
+			if infos, err = h.cfg.Upstream.FetchModels(a); err == nil && len(infos) > 0 {
+				break
+			}
+			log.Printf("fetch models realm=%s uid=%s: %v", realm, a.UID, err)
+		}
+		ok := err == nil && len(infos) > 0
+
+		dynamicModelsCache.Lock()
+		if dynamicModelsCache.byRealm == nil {
+			dynamicModelsCache.byRealm = map[string]*realmCatalog{}
+		}
+		c := dynamicModelsCache.byRealm[realm]
+		if c == nil {
+			c = &realmCatalog{}
+			dynamicModelsCache.byRealm[realm] = c
+		}
+		if ok {
+			c.infos, c.fetched, c.lastFail = infos, time.Now(), time.Time{}
+		} else {
+			c.lastFail = time.Now()
+		}
+		dynamicModelsCache.Unlock()
+
+		if ok {
+			out[realm] = infos
+		} else if len(cached.infos) > 0 {
+			out[realm] = cached.infos
+		}
+	}
+	return out
+}
+
+// WarmModels 预热各域模型目录（网关启动时调用一次），使聊天路由一开始就有域偏好可用。
+func (h *Handler) WarmModels() { h.fetchDynamicModels() }
+
+// modelRealms 返回已缓存目录里该模型可用的域；目录未知或模型不在任何目录里返回 nil
+// （此时不做域偏好）。只读缓存：不在聊天路径上打上游（目录由启动预热与 /v1/models 刷新）。
+func (h *Handler) modelRealms(model string) map[string]bool {
+	dynamicModelsCache.RLock()
+	var realms map[string]bool
+	for realm, c := range dynamicModelsCache.byRealm {
+		for _, mi := range c.infos {
+			if mi.ID == model {
+				if realms == nil {
+					realms = map[string]bool{}
+				}
+				realms[realm] = true
+				break
+			}
+		}
 	}
 	dynamicModelsCache.RUnlock()
+	return realms
+}
 
-	acct := h.cfg.Pool.Pick()
-	if acct == nil {
+// realmAvoidSet 返回「不在该模型可用域」的账号集合，用于选号时优先避开；
+// 无偏好（目录未知 / 模型不在目录 / 所有域都可用）返回 nil。
+//
+// 只是偏好、不是硬过滤：调用方在偏好域选不到号时仍会回落到其他域
+// （实测有些不在 cli 目录里的模型也能调通，目录并不完整）。
+func (h *Handler) realmAvoidSet(model string) map[string]bool {
+	realms := h.modelRealms(model)
+	if len(realms) == 0 || len(realms) == len(realmOrder) {
 		return nil
 	}
-	infos, err := h.cfg.Upstream.FetchModels(acct)
-	if err != nil || len(infos) == 0 {
-		// 拉取失败惩罚该账号，避免下次 Pick 又选中同一个反复失败；lastFail 保持全局负缓存。
-		h.cfg.Pool.NoteError(acct.UID)
-		dynamicModelsCache.Lock()
-		dynamicModelsCache.lastFail = time.Now()
-		dynamicModelsCache.Unlock()
-		return nil
+	var avoid map[string]bool
+	for _, st := range h.cfg.Pool.List() {
+		if a := h.cfg.Pool.PeekByUID(st.UID); a != nil && !realms[realmOf(a)] {
+			if avoid == nil {
+				avoid = map[string]bool{}
+			}
+			avoid[st.UID] = true
+		}
 	}
-	dynamicModelsCache.Lock()
-	dynamicModelsCache.ids = infos
-	dynamicModelsCache.fetched = time.Now()
-	dynamicModelsCache.lastFail = time.Time{} // 成功则清空负缓存
-	dynamicModelsCache.Unlock()
-	return infos
+	return avoid
 }
 
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -684,6 +856,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 模型域偏好：目录显示该模型只在某些域可用时，先避开其他域的账号（否则落到没有该模型的
+	// 域必败、白白轮转）。固定号（/v1/a/<uid>）尊重调用方指定，不做偏好。
+	var avoid map[string]bool
+	if r.PathValue("uid") == "" {
+		avoid = h.realmAvoidSet(peek.Model)
+		if stickyUID != "" && avoid[stickyUID] {
+			h.unbindSession(sessKey)
+			stickyUID = ""
+		}
+	}
+	// clientErrOnly 本次所有失败是否都是「客户端错误」（如 11102 模型无权限）：
+	// 是则把上游 4xx 原样交给客户端，而不是报 503 no_healthy_account 误导成账号池故障。
+	clientErrOnly, failures := true, 0
+
 	// 在途租约：成功选中即占名额；函数出口（含成功 return 与 panic）统一释放。
 	var heldUID string
 	defer func() {
@@ -706,11 +892,23 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 固定号（/v1/a/<uid>）只打指定账号：失败不轮转、不可用不改派。此前失败后会解绑并
+	// 回落普通轮换，请求被静默换到池里别的账号（如国际版固定号由国内版账号作答），
+	// 调用方既看不到真实错误，统计也记到别的号上。
+	pinned := r.PathValue("uid") != ""
 	for i := 0; i < h.cfg.MaxRotate; i++ {
+		if pinned && i > 0 {
+			break
+		}
 		// 选号：粘性号优先（PickByUID 已校验 health + 在途未满），否则普通轮换。
 		var acct *auth.Auth
 		if stickyUID != "" {
 			acct = h.cfg.Pool.PickByUID(stickyUID)
+			if acct == nil && pinned {
+				lastErr = fmt.Errorf("pinned account %s unavailable (cooling/disabled/in-flight full)", stickyUID)
+				clientErrOnly = false
+				break
+			}
 			if acct == nil {
 				// 粘性号当前不可用（冷却/占满）→ 解绑，本次回落普通轮换。
 				h.unbindSession(sessKey)
@@ -720,7 +918,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if acct == nil {
 			// 模型感知选号：6004 模型级冷却中的账号，换个模型仍可被选中
 			// （模型限流不代表账号在其他模型下不可用）。
-			acct = h.cfg.Pool.PickExcludingForModel(tried, peek.Model)
+			acct = h.cfg.Pool.PickExcludingForModel(withAvoid(tried, avoid), peek.Model)
+			if acct == nil && len(avoid) > 0 {
+				// 偏好域已无可用账号：回落到其他域（目录只是偏好，可能不全）。
+				acct = h.cfg.Pool.PickExcludingForModel(tried, peek.Model)
+			}
 		}
 		if acct == nil {
 			st.status = http.StatusServiceUnavailable
@@ -745,6 +947,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if acct.NeedsRefresh(h.cfg.RefreshSkew) {
 			if err := h.cfg.Upstream.RefreshToken(acct); err != nil {
 				lastErr = err
+				clientErrOnly = false
 				var ue *upstream.Error
 				if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
 					h.cfg.Pool.Disable(acct.UID, "refresh session dead")
@@ -766,6 +969,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 上游 client 已打 transport error 日志。
 			st.status = http.StatusServiceUnavailable
 			lastErr = terr
+			clientErrOnly = false
 			fail(acct.UID)
 			continue
 		}
@@ -773,6 +977,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			st.status = status
 			kind := upstream.Classify(status, string(respBody))
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
+			failures++
+			if kind != upstream.ErrClient && kind != upstream.ErrBadParams {
+				clientErrOnly = false
+			}
 			h.applyErrorPolicy(acct.UID, kind, string(respBody), peek.Model)
 			fail(acct.UID)
 			continue
@@ -810,12 +1018,53 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	var ue *upstream.Error
+	// 仅账号池请求透出 4xx；固定号（/v1/a/<uid>）保持 503 —— 上层路由器靠 503 切到下一个
+	// 账号连接，而别的账号可能恰好有该模型的权限。
+	if r.PathValue("uid") == "" && failures > 0 && clientErrOnly && errors.As(lastErr, &ue) && ue.Status >= 400 && ue.Status < 500 {
+		writeOpenAIError(w, ue.Status, "upstream_rejected", upstreamMessage(ue.Msg))
+		st.status = ue.Status
+		return
+	}
 	msg := "all accounts unavailable (cooling/disabled)"
 	if lastErr != nil {
 		msg += ": " + lastErr.Error()
 	}
 	writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account", msg)
 	st.status = http.StatusServiceUnavailable
+}
+
+// withAvoid 返回 tried ∪ avoid（avoid 为空时直接返回 tried，不分配）。
+func withAvoid(tried, avoid map[string]bool) map[string]bool {
+	if len(avoid) == 0 {
+		return tried
+	}
+	m := make(map[string]bool, len(tried)+len(avoid))
+	for k := range tried {
+		m[k] = true
+	}
+	for k := range avoid {
+		m[k] = true
+	}
+	return m
+}
+
+// upstreamMessage 从上游错误响应体里取人能读的原因：JSON 信封取 msg，否则截断原文。
+func upstreamMessage(body string) string {
+	var env struct {
+		Code any    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if json.Unmarshal([]byte(body), &env) == nil && env.Msg != "" {
+		if env.Code != nil {
+			return fmt.Sprintf("upstream code=%v: %s", env.Code, env.Msg)
+		}
+		return env.Msg
+	}
+	if len(body) > 300 {
+		body = body[:300]
+	}
+	return "upstream: " + body
 }
 
 // applyErrorPolicy 按错误分类对账号施加冷却/禁用/熔断策略（最终版状态机）。

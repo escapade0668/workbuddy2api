@@ -1,0 +1,97 @@
+{
+ "code": 0,
+ "msg": "OK",
+ "data": {
+  "agents": [
+   {
+    "name": "cli",
+    "models": [
+     "hy3",
+     "glm-5.2",
+     "minimax-m2.7"
+    ]
+   }
+  ],
+  "models": [
+   {
+    "credits": "x0.00 credits",
+    "disabledMultimodal": false,
+    "id": "hy3",
+    "maxAllowedSize": 192000,
+    "maxInputTokens": 192000,
+    "maxOutputTokens": 64000,
+    "name": "Hy3",
+    "onlyReasoning": true,
+    "reasoning": {
+     "effort": "high",
+     "summary": "auto"
+    },
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "supportsToolCall": true,
+    "temperature": 0.9,
+    "top_p": 1,
+    "vendor": "j"
+   },
+   {
+    "credits": "x0.79 credits",
+    "id": "glm-5.2",
+    "maxAllowedSize": 1000000,
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 64000,
+    "name": "GLM-5.2",
+    "onlyReasoning": true,
+    "reasoning": {
+     "effort": "medium",
+     "summary": "auto"
+    },
+    "relatedModels": {
+     "lite": "glm-5.2",
+     "reasoning": "glm-5.2"
+    },
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "supportsToolCall": true,
+    "temperature": 1,
+    "vendor": "e"
+   },
+   {
+    "credits": "x0.19 credits",
+    "id": "minimax-m2.7",
+    "maxAllowedSize": 200000,
+    "maxInputTokens": 200000,
+    "maxOutputTokens": 48000,
+    "name": "MiniMax-M2.7",
+    "onlyReasoning": true,
+    "reasoning": {
+     "effort": "medium",
+     "summary": "auto"
+    },
+    "relatedModels": {
+     "lite": "minimax-m2.7",
+     "reasoning": "minimax-m2.7"
+    },
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "supportsToolCall": true,
+    "temperature": 1,
+    "vendor": "f"
+   },
+   {
+    "credits": "x2.00 credits",
+    "id": "default",
+    "maxAllowedSize": 56000,
+    "maxInputTokens": 200000,
+    "maxOutputTokens": 24000,
+    "name": "Default",
+    "relatedModels": {
+     "lite": "default",
+     "reasoning": "default"
+    },
+    "supportsImages": false,
+    "supportsToolCall": true,
+    "vendor": "v"
+   }
+  ]
+ }
+}

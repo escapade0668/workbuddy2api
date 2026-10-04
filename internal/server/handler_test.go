@@ -583,7 +583,7 @@ func TestChatHTTP4xxClientDoesNotPenalize(t *testing.T) {
 	h := NewHandler(Config{Pool: p, Upstream: up})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
-	if rec.Code != 503 {
+	if rec.Code != 400 { // 账号池请求全部是客户端错误：透出上游 4xx（不再报 503 误导成账号池故障）
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
 	st, _ := p.Status("u1")
@@ -622,11 +622,7 @@ func TestModelsEndpoint(t *testing.T) {
 
 func TestModelsDynamic(t *testing.T) {
 	// 清缓存
-	dynamicModelsCache.Lock()
-	dynamicModelsCache.ids = nil
-	dynamicModelsCache.fetched = time.Time{}
-	dynamicModelsCache.lastFail = time.Time{}
-	dynamicModelsCache.Unlock()
+	resetModelsCache()
 
 	// 假上游返回动态模型（含 agents + maxInputTokens/maxOutputTokens）
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
@@ -676,7 +672,10 @@ func TestModelsDynamic(t *testing.T) {
 
 	// 第二次调用走缓存（把上游关掉也成功）
 	dynamicModelsCache.RLock()
-	cached := len(dynamicModelsCache.ids)
+	cached := 0
+	for _, c := range dynamicModelsCache.byRealm {
+		cached += len(c.infos)
+	}
 	dynamicModelsCache.RUnlock()
 	if cached != 3 {
 		t.Errorf("cache not populated: %d", cached)
@@ -685,11 +684,7 @@ func TestModelsDynamic(t *testing.T) {
 
 func TestModelsDynamicFallsBackToStatic(t *testing.T) {
 	// 清缓存
-	dynamicModelsCache.Lock()
-	dynamicModelsCache.ids = nil
-	dynamicModelsCache.fetched = time.Time{}
-	dynamicModelsCache.lastFail = time.Time{}
-	dynamicModelsCache.Unlock()
+	resetModelsCache()
 
 	// 假上游 500
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
@@ -711,38 +706,13 @@ func TestModelsDynamicFallsBackToStatic(t *testing.T) {
 	}
 }
 
-func TestModelsFetchFailurePenalizesAccount(t *testing.T) {
-	// 清缓存
-	dynamicModelsCache.Lock()
-	dynamicModelsCache.ids = nil
-	dynamicModelsCache.fetched = time.Time{}
-	dynamicModelsCache.lastFail = time.Time{}
-	dynamicModelsCache.Unlock()
-
-	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	p.SetBreaker(1, time.Hour, time.Hour) // 熔断阈值 1：一次 fetch 失败即熔断
-	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
-		return 500, `boom`, false
-	})
-	h := NewHandler(Config{Pool: p, Upstream: up})
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models", nil))
-	if rec.Code != 200 {
-		t.Fatalf("code=%d (static fallback)", rec.Code)
-	}
-	st, _ := p.Status("u1")
-	if !st.Cooling {
-		t.Fatalf("fetch failure should trip breaker with threshold=1: %+v", st)
-	}
-}
+// 原 TestModelsFetchFailurePenalizesAccount 断言「目录拉取失败要罚账号（熔断）」，已反转：
+// 目录端点失败与账号健康无关（旧端点在国际版恒 500，国际版账号因此每次被选来取目录都白挨罚）。
+// 新断言见 realm_models_test.go 的 TestModelsFetchFailureDoesNotPenalizeAccount。
 
 func TestModelsNegativeCacheOnFetchFailure(t *testing.T) {
 	// 清缓存
-	dynamicModelsCache.Lock()
-	dynamicModelsCache.ids = nil
-	dynamicModelsCache.fetched = time.Time{}
-	dynamicModelsCache.lastFail = time.Time{}
-	dynamicModelsCache.Unlock()
+	resetModelsCache()
 
 	var calls int
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
@@ -752,8 +722,8 @@ func TestModelsNegativeCacheOnFetchFailure(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: up})
 
-	// 连续 3 次请求，上游持续 500 → 只应触发 1 次 fetch（负缓存生效），
-	// 其余走静态 fallback（仍返回 200）。
+	// 连续 3 次请求，上游持续 500 → 只应触发 1 轮 fetch（负缓存生效），
+	// 其余走静态 fallback（仍返回 200）。一轮 = 2 次上游调用（/v3/config + 旧端点回落）。
 	for i := 0; i < 3; i++ {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models", nil))
@@ -761,21 +731,21 @@ func TestModelsNegativeCacheOnFetchFailure(t *testing.T) {
 			t.Fatalf("req %d: code=%d body=%s", i, rec.Code, rec.Body)
 		}
 	}
-	if calls != 1 {
-		t.Errorf("want 1 fetch, got %d", calls)
+	if calls != 2 {
+		t.Errorf("want 1 fetch round (2 calls), got %d calls", calls)
 	}
 
 	// 冷却期结束（把失败时间戳拨回 10 分钟前）→ 应重新 fetch。
 	dynamicModelsCache.Lock()
-	dynamicModelsCache.lastFail = time.Now().Add(-10 * time.Minute)
+	dynamicModelsCache.byRealm["cn"].lastFail = time.Now().Add(-10 * time.Minute)
 	dynamicModelsCache.Unlock()
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models", nil))
 	if rec.Code != 200 {
 		t.Fatalf("after cooldown: code=%d", rec.Code)
 	}
-	if calls != 2 {
-		t.Errorf("want 2 fetch after cooldown, got %d", calls)
+	if calls != 4 {
+		t.Errorf("want 2nd fetch round after cooldown (4 calls), got %d", calls)
 	}
 }
 

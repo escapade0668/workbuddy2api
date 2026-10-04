@@ -433,49 +433,128 @@ type ModelInfo struct {
 	ContextWindow int64    // = maxInputTokens
 	MaxTokens     int64    // = maxOutputTokens
 	Efforts       []string // reasoning.supportedEfforts（空=未知/固定档）
+
+	// 以下为模型目录元信息，原样透出到 /v1/models（缺省即上游未给）。
+	Description       string // descriptionZh，缺省回落 descriptionEn
+	Credits           string // 积分倍率原文，如 "x0.79" / "x0.19 credits"；空 = 上游未标
+	Vendor            string
+	Tags              []string
+	IsDefault         bool
+	OnlyReasoning     bool
+	SupportsImages    bool
+	SupportsReasoning bool
+	SupportsToolCall  bool
+	MaxAllowedSize    int64
+	ReasoningEffort   string // reasoning.defaultEffort，缺省回落 reasoning.effort
 }
 
-// FetchModels 调上游动态模型接口。
-// 字段名与上游实际返回对齐：maxInputTokens（非 contextWindow）、maxOutputTokens（非 maxTokens）。
+// 模型目录端点。
+const (
+	// endpointV3Config 首选：两个域都可用，且带倍率等元信息。
+	endpointV3Config = "/v3/config"
+	// endpointConsoleModels 旧端点，仅作回落：2026-10-05 实测国际版恒返回 500 HTML。
+	endpointConsoleModels = "/console/enterprises/personal/models"
+)
+
+// FetchModels 拉取账号**所在域**的模型目录（只含 cli agent 可调用的模型，按其顺序）。
+//
+// 首选 /v3/config：旧端点 /console/enterprises/personal/models 在国际版（workbuddy.ai）
+// 恒返回 500，国际版账号一直拿不到动态目录、静默回落静态表。/v3/config 两个域都正常。
+//
+// 必须用网关自己的 CLI 头取（CommonHeaders）：同一账号用桌面端 UA 取到的列表与 CLI 身份
+// 可调用的并不一致（实测 gpt-6-luna 在桌面端列表里，CLI 身份调用报 "service info not found"）；
+// CLI UA 列表里的模型实测都能调通。
 func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
-	url := c.chatBase(a) + "/console/enterprises/personal/models"
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	out, err := c.fetchModelsFrom(a, endpointV3Config)
+	if err != nil {
+		log.Printf("fetch models uid=%s: %s 失败（%v），回落 %s", a.UID, endpointV3Config, err, endpointConsoleModels)
+		out, err = c.fetchModelsFrom(a, endpointConsoleModels)
+		if err != nil {
+			return nil, err
+		}
+	}
+	// 合并进 effort 能力缓存（供请求体降级；无 supportedEfforts 的模型不入缓存）。
+	// 合并而非整表替换：两个域各取一次时，后取的不能把先取的域清掉。
+	c.effortsMu.Lock()
+	if c.efforts == nil {
+		c.efforts = make(map[string][]string, len(out))
+	}
+	for _, mi := range out {
+		if len(mi.Efforts) > 0 {
+			c.efforts[mi.ID] = mi.Efforts
+		}
+	}
+	c.effortsMu.Unlock()
+	return out, nil
+}
+
+// fetchModelsFrom 请求一个目录端点并解析。两个端点的 data 同形：models 全集 + agents。
+func (c *Client) fetchModelsFrom(a *auth.Auth, path string) ([]ModelInfo, error) {
+	req, err := http.NewRequest(http.MethodGet, c.chatBase(a)+path, nil)
 	if err != nil {
 		return nil, err
 	}
+	if path == endpointV3Config {
+		CommonHeaders(req, a)
+	} else {
+		origin := originRefererFor(a)
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Origin", origin)
+		req.Header.Set("Referer", origin+"/")
+		req.Header.Set("User-Agent", clientUA)
+	}
 	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
-	req.Header.Set("Accept", "application/json")
-	origin := originRefererFor(a)
-	req.Header.Set("Origin", origin)
-	req.Header.Set("Referer", origin+"/")
-	req.Header.Set("User-Agent", clientUA)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("models api status %d: %s", resp.StatusCode, truncate(string(raw), 120))
+	}
+	return parseModelCatalog(raw)
+}
+
+// parseModelCatalog 解析目录响应：只保留 agents 里 cli 的模型列表（按其顺序），
+// 跳过 disabled 与目录里查不到的 id。data.models 是全集（实测国内版 32 个里只有 17 个
+// 在 cli 列表，其余是补全/图片/内部模型），必须按 cli 列表过滤。
+func parseModelCatalog(raw []byte) ([]ModelInfo, error) {
+	type agent struct {
+		Name   string   `json:"name"`
+		Models []string `json:"models"`
 	}
 	var env struct {
 		Code int `json:"code"`
 		Data struct {
 			Models []struct {
-				ID              string `json:"id"`
-				Name            string `json:"name"`
-				MaxInputTokens  int64  `json:"maxInputTokens"`
-				MaxOutputTokens int64  `json:"maxOutputTokens"`
-				Disabled        bool   `json:"disabled"`
-				Reasoning       struct {
+				ID                string   `json:"id"`
+				Name              string   `json:"name"`
+				DescriptionZh     string   `json:"descriptionZh"`
+				DescriptionEn     string   `json:"descriptionEn"`
+				Credits           string   `json:"credits"`
+				Vendor            string   `json:"vendor"`
+				Tags              []string `json:"tags"`
+				IsDefault         bool     `json:"isDefault"`
+				OnlyReasoning     bool     `json:"onlyReasoning"`
+				SupportsImages    bool     `json:"supportsImages"`
+				SupportsReasoning bool     `json:"supportsReasoning"`
+				SupportsToolCall  bool     `json:"supportsToolCall"`
+				MaxAllowedSize    int64    `json:"maxAllowedSize"`
+				MaxInputTokens    int64    `json:"maxInputTokens"`
+				MaxOutputTokens   int64    `json:"maxOutputTokens"`
+				Disabled          bool     `json:"disabled"`
+				Reasoning         struct {
 					Effort           string   `json:"effort"`
+					DefaultEffort    string   `json:"defaultEffort"`
 					SupportedEfforts []string `json:"supportedEfforts"`
 				} `json:"reasoning"`
 			} `json:"models"`
-			Agents []struct {
-				Name   string   `json:"name"`
-				Models []string `json:"models"`
-			} `json:"agents"`
+			Agents []agent `json:"agents"`
+			// 未登录时 /v3/config 给的是 data.agent.agents 形态，一并兼容。
+			Agent struct {
+				Agents []agent `json:"agents"`
+			} `json:"agent"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
@@ -485,7 +564,7 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 		return nil, fmt.Errorf("models api code=%d", env.Code)
 	}
 	var cliIDs []string
-	for _, ag := range env.Data.Agents {
+	for _, ag := range append(env.Data.Agents, env.Data.Agent.Agents...) {
 		if ag.Name == "cli" {
 			cliIDs = ag.Models
 			break
@@ -494,53 +573,41 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	if len(cliIDs) == 0 {
 		return nil, fmt.Errorf("no cli agent models found")
 	}
-	dynMap := make(map[string]struct {
-		ID              string
-		Name            string
-		MaxInputTokens  int64
-		MaxOutputTokens int64
-		Disabled        bool
-		Efforts         []string
-	}, len(env.Data.Models))
-	for _, m := range env.Data.Models {
-		dynMap[m.ID] = struct {
-			ID              string
-			Name            string
-			MaxInputTokens  int64
-			MaxOutputTokens int64
-			Disabled        bool
-			Efforts         []string
-		}{m.ID, m.Name, m.MaxInputTokens, m.MaxOutputTokens, m.Disabled, m.Reasoning.SupportedEfforts}
+	byID := make(map[string]int, len(env.Data.Models))
+	for i, m := range env.Data.Models {
+		byID[m.ID] = i
 	}
 	out := make([]ModelInfo, 0, len(cliIDs))
 	for _, id := range cliIDs {
-		m, ok := dynMap[id]
-		if !ok || m.Disabled {
+		i, ok := byID[id]
+		if !ok || env.Data.Models[i].Disabled {
 			continue
 		}
+		m := env.Data.Models[i]
+		desc := m.DescriptionZh
+		if desc == "" {
+			desc = m.DescriptionEn
+		}
+		effort := m.Reasoning.DefaultEffort
+		if effort == "" {
+			effort = m.Reasoning.Effort
+		}
 		out = append(out, ModelInfo{
-			ID:            m.ID,
-			Name:          m.Name,
-			ContextWindow: m.MaxInputTokens,
-			MaxTokens:     m.MaxOutputTokens,
-			Efforts:       m.Efforts,
+			ID: m.ID, Name: m.Name, ContextWindow: m.MaxInputTokens, MaxTokens: m.MaxOutputTokens,
+			Efforts: m.Reasoning.SupportedEfforts, Description: desc, Credits: m.Credits, Vendor: m.Vendor,
+			Tags: m.Tags, IsDefault: m.IsDefault, OnlyReasoning: m.OnlyReasoning, SupportsImages: m.SupportsImages,
+			SupportsReasoning: m.SupportsReasoning, SupportsToolCall: m.SupportsToolCall,
+			MaxAllowedSize: m.MaxAllowedSize, ReasoningEffort: effort,
 		})
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("models api returned empty list")
 	}
-	// 刷新 effort 能力缓存（供请求体降级；无 supportedEfforts 的模型不入缓存）。
-	cache := make(map[string][]string, len(out))
-	for _, mi := range out {
-		if len(mi.Efforts) > 0 {
-			cache[mi.ID] = mi.Efforts
-		}
-	}
-	c.effortsMu.Lock()
-	c.efforts = cache
-	c.effortsMu.Unlock()
 	return out, nil
 }
+
+// IsGlobalRealm 报告账号是否属于国际版（workbuddy.ai）；其余（含空 domain）为国内版。
+func IsGlobalRealm(a *auth.Auth) bool { return isGlobalRealm(a) }
 
 // UserResource 查询账号当前可花费积分余额（所有套餐 CycleCapacity 聚合，负值钳 0）。
 func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) {

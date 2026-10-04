@@ -151,7 +151,8 @@ func TestChatBadParamsRotatesWithoutPenalty(t *testing.T) {
 }
 
 // TestChatAllBadParams503CarriesUpstreamBody 全部账号都返回 11101 时，
-// 503 文案必须带上上游原始信息（便于定位是客户端 body 问题）。
+// 错误文案必须带上上游原始信息（便于定位是客户端 body 问题）。
+// 账号池走的请求全部是客户端错误时透出上游 4xx（不再报 503 误导成账号池故障）。
 func TestChatAllBadParams503CarriesUpstreamBody(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 400, `{"code":11101,"msg":"Unmarshal chat params failed with error: unexpected EOF"}`, false
@@ -163,12 +164,12 @@ func TestChatAllBadParams503CarriesUpstreamBody(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
 
-	if rec.Code != 503 {
-		t.Fatalf("code=%d body=%s want 503", rec.Code, rec.Body)
+	if rec.Code != 400 {
+		t.Fatalf("code=%d body=%s want 400（透出上游 4xx）", rec.Code, rec.Body)
 	}
 	body := rec.Body.String()
 	if !strings.Contains(body, "11101") || !strings.Contains(body, "Unmarshal chat params failed") {
-		t.Errorf("503 文案应包含上游 11101 信息: %s", body)
+		t.Errorf("错误文案应包含上游 11101 信息: %s", body)
 	}
 }
 

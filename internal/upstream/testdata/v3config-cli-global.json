@@ -1,0 +1,177 @@
+{
+ "code": 0,
+ "msg": "OK",
+ "data": {
+  "agents": [
+   {
+    "name": "cli",
+    "models": [
+     "default-model",
+     "deep-model",
+     "hy4-preview",
+     "gpt-5.6-luna",
+     "glm-5.2"
+    ]
+   }
+  ],
+  "models": [
+   {
+    "credits": "",
+    "descriptionEn": "Excellent coding model, great for daily use",
+    "descriptionZh": "优秀的编码模型，适合日常使用",
+    "id": "default-model",
+    "isDefault": true,
+    "maxAllowedSize": 200000,
+    "maxInputTokens": 176000,
+    "maxOutputTokens": 24000,
+    "name": "Auto",
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "temperature": 1,
+    "vendor": "e"
+   },
+   {
+    "credits": "x3.33 credits",
+    "descriptionEn": "Deep reasoning for analysis and hard problems",
+    "descriptionZh": "深度推理，适合深度分析与难题",
+    "id": "deep-model",
+    "maxAllowedSize": 200000,
+    "maxInputTokens": 176000,
+    "maxOutputTokens": 24000,
+    "name": "Deep",
+    "supportsImages": true,
+    "supportsToolCall": true,
+    "temperature": 1,
+    "vendor": "e"
+   },
+   {
+    "contextWindow": {
+     "defaultLength": 200000,
+     "supportedLengths": [
+      200000,
+      1000000
+     ]
+    },
+    "credits": "x0.29",
+    "descriptionEn": "Hunyuan's thinking model with enhanced reasoning capabilities",
+    "descriptionZh": "混元思考模型，具有增强的推理能力",
+    "disabledMultimodal": false,
+    "id": "hy4-preview",
+    "maxAllowedSize": 1000000,
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 64000,
+    "name": "Hy4 preview",
+    "onlyReasoning": true,
+    "reasoning": {
+     "canDisableThinking": false,
+     "defaultEffort": "high",
+     "summary": "auto",
+     "supportedEfforts": [
+      "high"
+     ]
+    },
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "supportsToolCall": true,
+    "temperature": 0.9,
+    "top_p": 1,
+    "vendor": "j"
+   },
+   {
+    "credits": "x0.14",
+    "descriptionEn": "OpenAI's lightweight model for fast responses and everyday tasks",
+    "descriptionZh": "OpenAI 轻量模型，响应快速，适合日常任务",
+    "id": "gpt-5.6-luna",
+    "maxAllowedSize": 1000000,
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 128000,
+    "name": "GPT-5.6-Luna",
+    "onlyReasoning": false,
+    "reasoning": {
+     "canDisableThinking": true,
+     "defaultEffort": "high",
+     "summary": "auto",
+     "supportedEfforts": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+     ]
+    },
+    "relatedModels": {
+     "lite": "gpt-5.6-luna",
+     "reasoning": "gpt-5.6-luna"
+    },
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "supportsToolCall": true,
+    "tags": [],
+    "vendor": "e"
+   },
+   {
+    "credits": "x0.79",
+    "descriptionEn": "1M context, built for long-horizon tasks.",
+    "descriptionZh": "1M 上下文，擅长长程任务",
+    "id": "glm-5.2",
+    "maxAllowedSize": 1000000,
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 48000,
+    "name": "GLM-5.2",
+    "onlyReasoning": false,
+    "reasoning": {
+     "canDisableThinking": true,
+     "defaultEffort": "high",
+     "summary": "auto",
+     "supportedEfforts": [
+      "high",
+      "xhigh"
+     ]
+    },
+    "relatedModels": {
+     "lite": "glm-5.2",
+     "reasoning": "glm-5.2"
+    },
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "supportsToolCall": true,
+    "tags": [
+     "craft"
+    ],
+    "temperature": 1,
+    "vendor": "e"
+   },
+   {
+    "contextWindow": {
+     "defaultLength": 300000,
+     "supportedLengths": [
+      300000,
+      1000000
+     ]
+    },
+    "credits": "x0.03",
+    "descriptionEn": "DeepSeek flagship model, supporting 1M context window, native multimodal model",
+    "descriptionZh": "DeepSeek 旗舰模型，支持 1M 上下文窗口，原生多模态",
+    "id": "deepseek-v4.1-flash-sg",
+    "maxAllowedSize": 1000000,
+    "maxInputTokens": 1000000,
+    "maxOutputTokens": 128000,
+    "name": "Deepseek-V4.1-Flash",
+    "onlyReasoning": true,
+    "reasoning": {
+     "effort": "high",
+     "summary": "auto"
+    },
+    "relatedModels": {
+     "lite": "deepseek-v4.1-flash-sg",
+     "reasoning": "deepseek-v4.1-flash-sg"
+    },
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "supportsToolCall": true,
+    "temperature": 1,
+    "vendor": "f"
+   }
+  ]
+ }
+}
