@@ -360,3 +360,33 @@ func TestCheckinErrorDoesNotCrash(t *testing.T) {
 	s.RunKeepaliveNow()
 	_ = errors.New("unused")
 }
+
+// TestPausedAccountStillChecksInAndKeepsAlive 人工停用只退出转发：签到与保活照常执行。
+func TestPausedAccountStillChecksInAndKeepsAlive(t *testing.T) {
+	f := &fakeUpstream{resourceRemain: 300}
+	srv := f.server()
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 1})
+	p.SetPaused("u1", true)
+
+	up := &upstream.Client{
+		HTTP:          srv.Client(),
+		ChatBaseCN:    srv.URL,
+		BillingBaseCN: srv.URL,
+	}
+	s := New(Config{Pool: p, Upstream: up})
+	s.RunCheckinNow()
+	s.RunKeepaliveNow()
+	if f.checkinCalls.Load() != 1 {
+		t.Errorf("停用账号仍应签到, checkin calls=%d", f.checkinCalls.Load())
+	}
+	if f.refreshCalls.Load() != 1 {
+		t.Errorf("停用账号仍应保活, refresh calls=%d", f.refreshCalls.Load())
+	}
+	st, _ := p.Status("u1")
+	if !st.Paused || st.Credits != 300 {
+		t.Errorf("签到后应保持停用并更新积分: %+v", st)
+	}
+}

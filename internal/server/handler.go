@@ -82,6 +82,9 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /v1/a/{uid}/chat/completions", h.withAuth(h.pinnedChat))
 	h.mux.HandleFunc("GET /v1/a/{uid}/quota", h.withAuth(h.pinnedQuota))
 	h.mux.HandleFunc("GET /v1/accounts", h.withAuth(h.accounts))
+	// 人工停用/启用：停用后不参与任何转发，但定时签到/保活照常（见 pool.SetPaused）。
+	h.mux.HandleFunc("POST /v1/accounts/{uid}/pause", h.withAuth(h.accountPause(true)))
+	h.mux.HandleFunc("POST /v1/accounts/{uid}/resume", h.withAuth(h.accountPause(false)))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	// 请求统计：所有经本网关的请求（含绕过面板的客户端）按模型聚合。
 	h.mux.HandleFunc("GET /v1/stats", h.withAuth(h.stats))
@@ -267,6 +270,7 @@ func (h *Handler) statsReset(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	total, healthy, cooling, disabled, inFlightFull := h.cfg.Pool.CountsDetailed()
+	paused := h.cfg.Pool.PausedCount()
 	sticky := 0
 	if h.cfg.StickyCount != nil {
 		sticky = h.cfg.StickyCount()
@@ -281,6 +285,7 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		"healthy":         healthy,
 		"cooling":         cooling,
 		"disabled":        disabled,
+		"paused":          paused,
 		"in_flight_full":  inFlightFull,
 		"sticky_sessions": sticky,
 		"redis_mode":      redisMode,
@@ -302,6 +307,7 @@ func (h *Handler) accounts(w http.ResponseWriter, r *http.Request) {
 		Credits   int64  `json:"credits"`
 		Cooling   bool   `json:"cooling"`
 		Disabled  bool   `json:"disabled"`
+		Paused    bool   `json:"paused"`
 		ChatPath  string `json:"chat_path"`
 		QuotaPath string `json:"quota_path"`
 		CoolUntil string `json:"cool_until,omitempty"`
@@ -315,6 +321,7 @@ func (h *Handler) accounts(w http.ResponseWriter, r *http.Request) {
 			Credits:   st.Credits,
 			Cooling:   st.Cooling,
 			Disabled:  st.Disabled,
+			Paused:    st.Paused,
 			ChatPath:  "/v1/a/" + st.UID + "/chat/completions",
 			QuotaPath: "/v1/a/" + st.UID + "/quota",
 		}
@@ -325,6 +332,21 @@ func (h *Handler) accounts(w http.ResponseWriter, r *http.Request) {
 		out = append(out, a)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"provider": "workbuddy", "accounts": out})
+}
+
+// accountPause 返回人工停用（paused=true）/启用（false）单个账号的 handler。
+// 状态即时生效并持久化；固定号端点同样拒绝已停用账号。
+func (h *Handler) accountPause(paused bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		uid := r.PathValue("uid")
+		if !h.cfg.Pool.SetPaused(uid, paused) {
+			writeOpenAIError(w, http.StatusNotFound, "not_found", "account not found: "+uid)
+			return
+		}
+		h.cfg.Pool.Flush() // 运维开关低频：立即落盘，免得 5s 窗口内重启丢状态
+		st, _ := h.cfg.Pool.Status(uid)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid, "paused": st.Paused})
+	}
 }
 
 // pinnedChat serves /v1/a/<uid>/chat/completions by pinning to that account.
@@ -905,7 +927,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if stickyUID != "" {
 			acct = h.cfg.Pool.PickByUID(stickyUID)
 			if acct == nil && pinned {
-				lastErr = fmt.Errorf("pinned account %s unavailable (cooling/disabled/in-flight full)", stickyUID)
+				lastErr = fmt.Errorf("pinned account %s unavailable (cooling/disabled/paused/in-flight full)", stickyUID)
 				clientErrOnly = false
 				break
 			}
@@ -1026,7 +1048,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.status = ue.Status
 		return
 	}
-	msg := "all accounts unavailable (cooling/disabled)"
+	msg := "all accounts unavailable (cooling/disabled/paused)"
 	if lastErr != nil {
 		msg += ": " + lastErr.Error()
 	}

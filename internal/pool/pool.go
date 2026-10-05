@@ -56,9 +56,12 @@ type Status struct {
 	SoftStreak    int       `json:"soft_streak,omitempty"` // 连续软冷却次数（指数退避指数，见 entry.softStreak）
 	// SoftRateModel 触发本次模型级软冷却（429 code=6004）的模型名；
 	// 非空表示该冷却只针对此模型，其他模型请求仍可用（见 healthyForModel）。
-	SoftRateModel   string    `json:"soft_rate_model,omitempty"`
-	Disabled        bool      `json:"disabled"`
-	DisabledReason  string    `json:"disabled_reason,omitempty"` // 仅 disabled 账号：禁用原因（运维可见）
+	SoftRateModel  string `json:"soft_rate_model,omitempty"`
+	Disabled       bool   `json:"disabled"`
+	DisabledReason string `json:"disabled_reason,omitempty"` // 仅 disabled 账号：禁用原因（运维可见）
+	// Paused 人工停用（运维开关）：不参与任何请求转发（含固定号端点），
+	// 但签到/保活/旅行照常——与系统判死的 Disabled 正交。
+	Paused          bool      `json:"paused"`
 	SuccessCount    int64     `json:"success_count,omitempty"`
 	ErrTotal        int64     `json:"err_total,omitempty"`
 	LastSuccessTime time.Time `json:"last_success,omitempty"`
@@ -81,6 +84,7 @@ type entry struct {
 	until        time.Time // 冷却截止（即时冷却：CoolSoft 429 / CoolHard 余额耗尽）
 	disabled     bool
 	reason       string
+	paused       bool      // 人工停用：只退出选号，不影响签到/保活（与 disabled 正交，见 SetPaused）
 	lastUsed     time.Time // 最近被选中时刻（防并发撞号）
 
 	// breakerUntil / fails / retryCount 为熔断器运行态（不持久化）。
@@ -113,7 +117,7 @@ type entry struct {
 
 // healthy 报告账号当前是否可选（未禁用、未处于任一冷却/熔断期）。
 func (e *entry) healthy(now time.Time) bool {
-	if e.disabled {
+	if e.disabled || e.paused {
 		return false
 	}
 	if !e.until.IsZero() && now.Before(e.until) {
@@ -136,7 +140,7 @@ func (e *entry) healthyForModel(now time.Time, reqModel string) bool {
 		// （熔断/禁用是账号级事实，模型豁免不覆盖）。
 		// 注意只判"熔断尚未到期"，不能判 breakerUntil.IsZero()：已过期的熔断
 		// 时间戳非零，那样写会把已恢复的账号误判为不可用。
-		if e.disabled {
+		if e.disabled || e.paused {
 			return false
 		}
 		return e.breakerUntil.IsZero() || !now.Before(e.breakerUntil)
@@ -173,9 +177,11 @@ func (e *entry) fallbackKind(now time.Time) string {
 
 // stateAccount 单个账号的持久化状态（JSON tag 全小写下划线，向后兼容：缺字段零值）。
 type stateAccount struct {
-	Credits      int64     `json:"credits"`
-	Disabled     bool      `json:"disabled"`
-	Reason       string    `json:"reason,omitempty"`
+	Credits  int64  `json:"credits"`
+	Disabled bool   `json:"disabled"`
+	Reason   string `json:"reason,omitempty"`
+	// Paused 人工停用开关。旧 state.json 缺此字段 → 零值（启用），向后兼容。
+	Paused       bool      `json:"paused,omitempty"`
 	Until        time.Time `json:"until,omitempty"`
 	CoolKind     CoolKind  `json:"cool_kind"`
 	SuccessCount int64     `json:"success_count,omitempty"`
@@ -627,8 +633,8 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time) *a
 		if tried != nil && tried[uid] {
 			continue
 		}
-		if e.disabled {
-			continue // 禁用的账号永不参与兜底
+		if e.disabled || e.paused {
+			continue // 禁用/人工停用的账号永不参与兜底
 		}
 		if e.coolKind == CoolHard && !e.until.IsZero() && now.Before(e.until) {
 			continue // 余额耗尽号（处于有效 hard 冷却期）不参与兜底：等签到恢复，调了必 402
@@ -931,6 +937,26 @@ func (p *Pool) Disable(uid, reason string) {
 	}
 }
 
+// SetPaused 人工停用/启用账号（运维开关），返回账号是否存在。
+//
+// 与 Disable 的区别：disabled 是系统判死（session dead），签到/保活都会跳过；
+// paused 只让账号退出选号（含固定号端点与全冷却兜底），定时签到/保活/旅行照常，
+// 积分与 token 在停用期间持续维护，恢复启用即可直接接流量。
+// 状态随 state.json（及 Redis 快照）持久化，重启不丢。
+func (p *Pool) SetPaused(uid string, paused bool) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	if e.paused != paused {
+		e.paused = paused
+		p.dirty.Store(true)
+	}
+	return true
+}
+
 // NoteSessionDead 记录一次 ErrSessionDead（12153）——**不立即禁用**。
 //
 // 为什么改：旧行为一次 12153 即 Disable 且无复活路径，但 12153 会被临时性触发
@@ -1120,6 +1146,7 @@ func (p *Pool) PickByUID(uid string) *auth.Auth {
 }
 
 // CountsDetailed 返回 total/healthy/cooling/disabled/inFlightFull 五类计数。
+// 人工停用（paused）的账号不计入 healthy/cooling（另见 PausedCount），disabled 优先于 paused。
 // cooling 含常规冷却（until）与熔断期（breakerUntil）。
 // 注意：healthy 口径不含 inFlight 维度（是状态机权威判定，只看 disabled/until/breakerUntil）；
 // inFlightFull 是 healthy 的子集——healthy 里已达在途上限的账号数，供 /status 透出满载度。
@@ -1133,6 +1160,8 @@ func (p *Pool) CountsDetailed() (total, healthy, cooling, disabled, inFlightFull
 		switch {
 		case e.disabled:
 			disabled++
+		case e.paused:
+			// 人工停用：既不可用也不是冷却，单独由 PausedCount 统计。
 		case !e.healthy(now):
 			cooling++
 		default:
@@ -1143,6 +1172,20 @@ func (p *Pool) CountsDetailed() (total, healthy, cooling, disabled, inFlightFull
 		}
 	}
 	return total, healthy, cooling, disabled, inFlightFull
+}
+
+// PausedCount 返回人工停用（且未被系统禁用）的账号数，与 CountsDetailed 互补：
+// total = healthy + cooling + disabled + paused。
+func (p *Pool) PausedCount() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	n := 0
+	for _, e := range p.byUID {
+		if e.paused && !e.disabled {
+			n++
+		}
+	}
+	return n
 }
 
 // ServableNow 报告池当前是否可服务：存在至少一个 healthy 且未占满在途名额的账号。
@@ -1186,6 +1229,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Cooling:         now.Before(e.until) || now.Before(e.breakerUntil),
 		Reason:          e.reason,
 		Disabled:        e.disabled,
+		Paused:          e.paused,
 		SuccessCount:    e.successCount,
 		ErrTotal:        e.errTotal,
 		LastSuccessTime: e.lastSuccess,
@@ -1243,6 +1287,7 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			credits:      s.Credits,
 			disabled:     s.Disabled,
 			reason:       s.Reason,
+			paused:       s.Paused,
 			until:        s.Until,
 			coolKind:     s.CoolKind,
 			successCount: s.SuccessCount,
@@ -1319,6 +1364,7 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			Credits:      e.credits,
 			Disabled:     e.disabled,
 			Reason:       e.reason,
+			Paused:       e.paused,
 			Until:        e.until,
 			CoolKind:     e.coolKind,
 			SuccessCount: e.successCount,

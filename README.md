@@ -220,7 +220,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 | 维度 | 字段 | 说明 |
 |---|---|---|
-| 健康 | `disabled` / `until` / `breakerUntil` | `healthy = !disabled && !until && !breakerUntil` |
+| 健康 | `disabled` / `paused` / `until` / `breakerUntil` | `healthy = !disabled && !paused && !until && !breakerUntil` |
 | 并发 | `inFlight` | 在途租约（运行态，不持久化），上限 `max_in_flight` |
 | 统计 | `successCount` / `errTotal` / `lastUsed` | 供成功率权重与闲置补偿 |
 
@@ -231,7 +231,12 @@ curl -s http://localhost:7863/v1/chat/completions \
      └────────────────────────────────────────────────┘
 
   Disabled（session 死亡，永久，需人工重新 login.sh）
+  Paused  （人工停用，POST /v1/accounts/{uid}/pause|resume 切换）
 ```
+
+**人工停用（`paused`）** 与系统禁用（`disabled`）正交：停用的账号不参与任何转发
+（普通轮换、会话粘性、`/v1/a/{uid}` 固定号、全冷却兜底都会跳过），但**定时签到 / token 保活 / 猫猫旅行照常执行**，
+积分与 token 在停用期间持续维护，恢复后可直接接流量。开关即时生效，随 `state.json`（及 Redis 快照）持久化。
 
 ### 错误分类与处置
 
@@ -343,7 +348,9 @@ curl -s http://localhost:7863/v1/chat/completions \
 |---|---|---|
 | `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | OpenAI 兼容补全；流式/非流式；请求体上限 8 MiB |
 | `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（动态拉取，缓存 1h；失败回落静态表 + 5min 负缓存） |
-| `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性） |
+| `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性/停用） |
+| `POST /v1/accounts/{uid}/pause` | Bearer（`api_key` 非空时） | 人工停用账号：退出转发，签到/保活照常；未知账号 404 |
+| `POST /v1/accounts/{uid}/resume` | Bearer（`api_key` 非空时） | 恢复启用账号 |
 | `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识（见下） |
 
 > 鉴权规则：仅当 `api_key` 非空才校验 `Authorization: Bearer <api_key>`；**`api_key` 为空时上述端点直接放行**；`/healthz` 恒无鉴权。
