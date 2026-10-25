@@ -26,7 +26,12 @@
   "upstream": {
     "timeout_seconds": 120,
     "header_timeout_seconds": 120,
-    "idle_timeout_seconds": 300
+    "idle_timeout_seconds": 300,
+    "endpoint_preset": "codebuddy"
+  },
+  "fingerprint": {
+    "cli_version": "2.165.0",
+    "user_agent": ""
   },
   "features": {
     "sanitize_blacklist_fingerprints": true

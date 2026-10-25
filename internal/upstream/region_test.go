@@ -68,10 +68,11 @@ func TestBillingBaseByRegion(t *testing.T) {
 // TestOriginRefererByRegion Origin/Referer 必须与 region 匹配，
 // 否则上游会按跨站请求拒绝。
 func TestOriginRefererByRegion(t *testing.T) {
-	if got := originRefererFor(&auth.Auth{Domain: "www.workbuddy.ai"}); got != "https://www.workbuddy.ai" {
+	if got := (&Client{}).originRefererFor(&auth.Auth{Domain: "www.workbuddy.ai"}); got != "https://www.workbuddy.ai" {
 		t.Errorf("Global origin = %q", got)
 	}
-	if got := originRefererFor(&auth.Auth{Domain: "copilot.tencent.com"}); got != "https://www.codebuddy.cn" {
+	if got := (&Client{}).originRefererFor(&auth.Auth{Domain: "copilot.tencent.com"}); got != "https://www.codebuddy.cn" {
+		// OriginCN 空时回落 codebuddy.cn 默认（preset=workbuddy 由 main 注入覆盖）。
 		t.Errorf("CN origin = %q", got)
 	}
 }

@@ -68,7 +68,24 @@ type Config struct {
 		HeaderTimeoutSeconds int `json:"header_timeout_seconds"`
 		// IdleTimeoutSeconds 聊天 SSE 流中空闲上限（活跃吐数据续命不掐）；<=0 回落默认 300。
 		IdleTimeoutSeconds int `json:"idle_timeout_seconds"`
+		// EndpointPreset CN realm 出站目标预设：
+		//
+		//	"codebuddy"（默认）= 旧域名：chat copilot.tencent.com / billing+Origin codebuddy.cn
+		//	"workbuddy"        = 官方 2026-10 品牌迁移后的域名：chat/billing/Origin 全部 www.workbuddy.cn
+		//
+		// 不影响 Global realm（恒 workbuddy.ai）。官方桌面端 5.9.0 的默认 endpoint 已是
+		// workbuddy.cn（product.json），旧域名仍在官方端点白名单内，可随时切回。
+		EndpointPreset string `json:"endpoint_preset"`
 	} `json:"upstream"`
+
+	Fingerprint struct {
+		// CLIVersion 出站 UA（CLI/<v> WorkBuddy/<v>）与 X-IDE-Version 的版本号，
+		// 默认 2.165.0（对齐 2026-10-25 抓包的官方 CLI）。官方升级后改这里跟进。
+		// 旧键 app_version 已退役（UA 单版本制），残留配置静默忽略。
+		CLIVersion string `json:"cli_version"`
+		// UserAgent 非空 = 完全覆盖组装出的 UA（逃生门）。
+		UserAgent string `json:"user_agent"`
+	} `json:"fingerprint"`
 
 	Features struct {
 		// SanitizeBlacklistFingerprints 出站请求体黑名单指纹脱敏（默认 true；false 完全还原）。
@@ -121,6 +138,9 @@ func Default() *Config {
 	c.Schedule.CheckinEnabled = true
 	c.Schedule.KeepaliveEnabled = true
 	c.Upstream.TimeoutSeconds = 120
+	// CN realm 出站目标默认仍是旧域名（codebuddy 体系），迁移由 endpoint_preset 显式开启。
+	c.Upstream.EndpointPreset = "codebuddy"
+	c.Fingerprint.CLIVersion = "2.165.0"
 	// 聊天请求体上限默认 8MB（超限 413，不静默截断）。
 	c.Server.MaxBodyMB = 8
 	// 请求统计默认开启并持久化到 state_file 同目录。
@@ -211,6 +231,15 @@ func applyEnv(c *Config) {
 			c.Features.SanitizeBlacklistFingerprints = b
 		}
 	}
+	if v := os.Getenv("WB2A_ENDPOINT_PRESET"); v != "" {
+		c.Upstream.EndpointPreset = v
+	}
+	if v := os.Getenv("WB2A_CLI_VERSION"); v != "" {
+		c.Fingerprint.CLIVersion = v
+	}
+	if v := os.Getenv("WB2A_USER_AGENT"); v != "" {
+		c.Fingerprint.UserAgent = v
+	}
 }
 
 func (c *Config) normalize() error {
@@ -264,6 +293,19 @@ func (c *Config) normalize() error {
 	}
 	if c.Upstream.IdleTimeoutSeconds <= 0 {
 		c.Upstream.IdleTimeoutSeconds = 300
+	}
+	// 出站目标预设：空值回落 codebuddy（Default() 已置；兜底显式 ""）。
+	if c.Upstream.EndpointPreset == "" {
+		c.Upstream.EndpointPreset = "codebuddy"
+	}
+	switch c.Upstream.EndpointPreset {
+	case "codebuddy", "workbuddy":
+	default:
+		return fmt.Errorf("upstream.endpoint_preset: %q 不合法（可选 codebuddy | workbuddy）", c.Upstream.EndpointPreset)
+	}
+	// 指纹版本：空值回落官方 2.165.0（覆盖显式 "" 与 Default() 被绕过的场景）。
+	if c.Fingerprint.CLIVersion == "" {
+		c.Fingerprint.CLIVersion = "2.165.0"
 	}
 	if !strings.HasPrefix(c.Listen, ":") && !strings.Contains(c.Listen, ":") {
 		c.Listen = ":" + c.Listen

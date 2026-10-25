@@ -69,7 +69,7 @@ func TestFetchModelsFromV3ConfigGlobal(t *testing.T) {
 		t.Fatalf("ids = %s", got)
 	}
 	reqs := seen()
-	if len(reqs) != 1 || !strings.HasPrefix(reqs[0], "global.fake/v3/config UA="+clientUA) {
+	if len(reqs) != 1 || !strings.HasPrefix(reqs[0], "global.fake/v3/config UA="+(&Client{}).userAgent()) {
 		t.Fatalf("应只用 CLI 头请求国际版 /v3/config: %v", reqs)
 	}
 	glm := infos[4]

@@ -93,6 +93,17 @@ func main() {
 	// 聊天 SSE 流中空闲上限（S3 空闲监控读取）。
 	up.IdleTimeout = time.Duration(cfg.Upstream.IdleTimeoutSeconds) * time.Second
 	up.SanitizeFingerprints = cfg.Features.SanitizeBlacklistFingerprints
+	// 客户端指纹（UA / X-IDE-Version；见 upstream.Fingerprint）。
+	up.CLIVersion = cfg.Fingerprint.CLIVersion
+	up.UserAgentOverride = cfg.Fingerprint.UserAgent
+	// P1 品牌迁移开关：CN realm 出站整体切到 workbuddy.cn（chat/billing/Origin 同域）。
+	// Global realm 不受影响（恒 workbuddy.ai）。
+	if cfg.Upstream.EndpointPreset == "workbuddy" {
+		up.ChatBaseCN = "https://www.workbuddy.cn"
+		up.BillingBaseCN = "https://www.workbuddy.cn"
+		up.OriginCN = "https://www.workbuddy.cn"
+		log.Printf("CN realm 出站目标已切换 preset=workbuddy（www.workbuddy.cn）")
+	}
 
 	sch := scheduler.New(scheduler.Config{
 		Pool:              p,

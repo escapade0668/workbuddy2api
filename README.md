@@ -184,6 +184,9 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `upstream.timeout_seconds` | `120` | 短 RPC（刷新/签到/余额/模型）总时长上限 |
 | `upstream.header_timeout_seconds` | 回落 `timeout_seconds` | 聊天首字节前（响应头）上限 |
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
+| `upstream.endpoint_preset` | `codebuddy` | CN realm 出站目标预设：`codebuddy` = 旧域名（chat copilot.tencent.com / billing+Origin codebuddy.cn）；`workbuddy` = 官方 2026-10 品牌迁移后域名（chat/billing/Origin 全部 www.workbuddy.cn，已实测可用）。Global realm 不受影响 |
+| `fingerprint.cli_version` | `2.165.0` | 出站 UA（`CLI/<v> WorkBuddy/<v>`）与 `X-IDE-Version` 版本（对齐 2026-10-25 抓包的官方 CLI；官方升级后改这里跟进）。旧键 `app_version` 已退役，残留配置静默忽略 |
+| `fingerprint.user_agent` | 空 | 非空 = 完全覆盖组装出的 UA（逃生门） |
 | `features.sanitize_blacklist_fingerprints` | `true` | 出站请求体黑名单指纹脱敏 |
 | `upstash.url` / `token` | 空 | 空 = 纯内存模式（Noop 降级，功能照常） |
 | `pool.max_in_flight` | `3` | 单账号最大在途请求数（`0` = 不限） |
@@ -465,7 +468,7 @@ curl -s http://127.0.0.1:7863/healthz | grep -q '"service":"workbuddy2api"'
 | `/activity/growth/buddy/agreement` `first` `info` | POST/GET | 同上 | 猫猫旅行：同意协议 / 首次领养 / 查询 |
 | `/activity/growth/buddy/travel/status` `depart` `claim` | GET/POST | 同上 | 猫猫旅行：状态 / 派出 / 领奖（随签到时点执行） |
 
-> 上述 `/v2/*` 端点是 CodeBuddy 官方 CLI/插件使用的接口，**未见公开 API 文档，属非公开/逆向接口**；本项目不主张任何上游接口的官方授权或稳定性承诺。出站统一携带 `CLI/2.63.2 CodeBuddy/2.63.2` UA；聊天请求带账号头（`X-User-Id` 等），**永不携带 `X-Refresh-Token`**。
+> 上述 `/v2/*` 端点是 CodeBuddy/WorkBuddy 官方 CLI/插件使用的接口，**未见公开 API 文档，属非公开/逆向接口**；本项目不主张任何上游接口的官方授权或稳定性承诺。出站统一携带官方 CLI 指纹（UA `CLI/2.165.0 WorkBuddy/2.165.0` + `x-stainless-*` 遥测头 + 会话关联/链路追踪头，对齐 2026-10-25 抓包）；聊天请求带账号头（`X-User-Id` 等），**永不携带 `X-Refresh-Token`**。
 
 ### 4. 发布来源与合规边界
 

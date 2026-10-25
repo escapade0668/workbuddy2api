@@ -4,6 +4,7 @@ package upstream
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/session"
 )
 
 // ErrKind 错误分类，pool 据此决定冷却时长。
@@ -235,6 +237,15 @@ type Client struct {
 	// SanitizeFingerprints 出站请求体黑名单指纹脱敏开关（默认 true；false 完全还原）。
 	SanitizeFingerprints bool
 
+	// —— 客户端指纹（对齐官方 CLI 2.165.0 抓包，见 fingerprint.go / headers.go）——
+	// CLIVersion 组装 UA 与 X-IDE-Version；UserAgentOverride 非空时完全覆盖 UA
+	//（逃生门）。零值回落内置默认。
+	CLIVersion        string
+	UserAgentOverride string
+	// OriginCN CN realm 的 Origin/Referer 基址；空回落 codebuddy.cn
+	// （endpoint_preset=workbuddy 时由 main 注入 workbuddy.cn）。
+	OriginCN string
+
 	// ChatBaseCN/BillingBaseCN CN realm（copilot.tencent.com / codebuddy.cn）。
 	ChatBaseCN    string
 	BillingBaseCN string
@@ -257,6 +268,7 @@ func New() *Client {
 		HTTP:                 &http.Client{Timeout: 120 * time.Second, Transport: tr},
 		ChatHTTP:             &http.Client{Timeout: 0, Transport: tr}, // 无总时长；首字节由 ResponseHeaderTimeout 管
 		SanitizeFingerprints: true,
+		CLIVersion:           DefaultCLIVersion,
 		ChatBaseCN:           "https://copilot.tencent.com",
 		BillingBaseCN:        "https://www.codebuddy.cn",
 		ChatBaseGlobal:       "https://www.workbuddy.ai",
@@ -365,7 +377,7 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 	if err != nil {
 		return err
 	}
-	RefreshHeaders(req, a)
+	c.RefreshHeaders(req, a)
 	data, err := c.doJSON(req)
 	if err != nil {
 		return err
@@ -406,7 +418,20 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	ChatHeaders(req, a)
+	// 会话关联头（官方每请求必带）：会话键与粘性路由同源（请求体 conversationId）。
+	convID := session.ExtractKey(body)
+	c.ChatHeaders(req, a, convID)
+	// 大请求体 gzip（对齐官方 CLI 的 axios >1KB 压缩阈值语义）。
+	if len(payload) > 1024 {
+		var zb bytes.Buffer
+		zw := gzip.NewWriter(&zb)
+		_, _ = zw.Write(payload)
+		_ = zw.Close()
+		payload = zb.Bytes()
+		req.Header.Set("Content-Encoding", "gzip")
+		req.ContentLength = int64(len(payload))
+		req.Body = io.NopCloser(bytes.NewReader(payload))
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	req = req.WithContext(ctx)
 	resp, err := c.chatHTTP().Do(req)
@@ -534,13 +559,13 @@ func (c *Client) fetchModelsFrom(a *auth.Auth, path string) ([]ModelInfo, error)
 		return nil, err
 	}
 	if path == endpointV3Config {
-		CommonHeaders(req, a)
+		c.CommonHeaders(req, a)
 	} else {
-		origin := originRefererFor(a)
+		origin := c.originRefererFor(a)
 		req.Header.Set("Accept", "application/json")
 		req.Header.Set("Origin", origin)
 		req.Header.Set("Referer", origin+"/")
-		req.Header.Set("User-Agent", clientUA)
+		req.Header.Set("User-Agent", c.userAgent())
 	}
 	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
 	resp, err := c.HTTP.Do(req)
@@ -665,7 +690,7 @@ func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) {
 	if err != nil {
 		return 0, err
 	}
-	BillingHeaders(req, a)
+	c.BillingHeaders(req, a)
 	data, err := c.doJSON(req)
 	if err != nil {
 		return 0, err
@@ -713,7 +738,7 @@ func (c *Client) DailyCheckin(a *auth.Auth) error {
 	if err != nil {
 		return err
 	}
-	BillingHeaders(req, a)
+	c.BillingHeaders(req, a)
 	_, err = c.doJSON(req)
 	return err
 }

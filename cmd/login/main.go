@@ -27,7 +27,7 @@ import (
 const (
 	upstreamBaseCN     = "https://copilot.tencent.com"
 	upstreamBaseGlobal = "https://www.workbuddy.ai"
-	clientUA           = "CLI/2.63.2 CodeBuddy/2.63.2"
+	clientUA           = "CLI/2.165.0 WorkBuddy/2.165.0" // 对齐官方 CLI 2.165.0 抓包（2026-10-25）
 	originCN           = "https://www.codebuddy.cn"
 	originGlobal       = "https://www.workbuddy.ai"
 
